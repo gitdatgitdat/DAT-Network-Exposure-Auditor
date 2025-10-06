@@ -1,0 +1,4 @@
+reports/
+logs/
+*.json
+*.csv
