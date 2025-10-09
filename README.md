@@ -28,11 +28,11 @@ Set-ExecutionPolicy -Scope Process RemoteSigned
 
 .\Get-NetworkExposure.ps1 -ComputerName example.com -Ports 80,443 -Json out.json -Csv out.csv  
 
-# From CSV  
-# samples\targets.csv  
-# ComputerName  
-# web1.contoso.com  
-# 192.168.1.10  
+From CSV  
+samples\targets.csv  
+ComputerName  
+web1.contoso.com  
+192.168.1.10  
 
 .\Get-NetworkExposure.ps1 -TargetsCsv .\samples\targets.csv -Json fleet.json -Csv fleet.csv  
 
