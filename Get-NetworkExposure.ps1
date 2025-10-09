@@ -3,6 +3,7 @@ param(
   [string[]]$ComputerName, [string]$TargetsCsv,
   [int[]]$Ports = @(22,80,443,445,3389,5985,5986),
   [string]$Json, [string]$Csv, [int]$TimeoutMs = 1500
+  [int]$ThrottleLimit = 32
 )
 
 # TCP Reachability
@@ -142,7 +143,17 @@ if ($ComputerName) { $targets += $ComputerName }
 $targets = $targets | Sort-Object -Unique
 if (-not $targets) { throw "No targets." }
 
-$all = foreach ($h in $targets) { Invoke-ScanHost -Target $h -Ports $Ports -TimeoutMs $TimeoutMs }
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+  $all = $targets | ForEach-Object -Parallel {
+    & $using:function:Invoke-ScanHost -Target $_ -Ports $using:Ports -TimeoutMs $using:TimeoutMs
+  } -ThrottleLimit $ThrottleLimit
+
+  $all = $all | ForEach-Object { $_ }
+} else {
+  $all = foreach ($h in $targets) {
+    Invoke-ScanHost -Target $h -Ports $Ports -TimeoutMs $TimeoutMs
+  }
+}
 
 $all | Format-Table Host,Port,Service,Open,Severity,Reasons -AutoSize
 if ($Json) { $all | ConvertTo-Json -Depth 5 | Out-File -Encoding utf8 $Json }
