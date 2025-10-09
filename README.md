@@ -4,7 +4,7 @@ PowerShell scanner that checks hosts for risky exposed services and weak TLS.
 
 ---
 
-# What it does (MVP)
+# What it does
 
 - Scans a host list or explicit names for ports (default: `22,80,443,445,3389,5985,5986`)  
 - Enrichment  
