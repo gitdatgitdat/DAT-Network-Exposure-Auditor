@@ -46,6 +46,8 @@ web1.contoso.com
 -Json <path>               | Write JSON  
 -Csv <path>                | Write CSV  
 -TimeoutMs <int>           | TCP/TLS timeouts (default 1500)  
+-ThrottleLimit <int>       | Parallel target scans on PowerShell 7+ (default 32)
+-Policy <path>             | JSON policy file (ports/TLS/overrides)
 
 ---
 
@@ -66,6 +68,38 @@ Severity (Info|Low|Medium|High)
 Reasons (semicolon-separated)
 
 CollectedAt (UTC)
+
+---
+
+# Custom Policy File
+
+You can tune severities and TLS rules globally, and override per host with a policy.json file. For example:
+
+{
+  "ports": { "3389": "High", "445": "High", "5985": "Medium", "5986": "Low" },
+  "tls":   { "minVersion": "Tls12", "expiryDaysWarn": 30, "requireHostnameMatch": true, "handshakeFailure": "High" },
+  "overrides": {
+    "intranet-gw": { "ports": { "3389": "Medium" } },
+    "legacy.example.com": { "tls": { "minVersion": "Tls11" } }
+  }
+}
+
+Use: .\Get-NetworkExposure.ps1 -ComputerName web1,web2 -Policy .\policy.json -Json out.json
+
+---
+
+# Parallel scanning (PS7+)
+
+On PowerShell 7+, targets are scanned in parallel (controlled by -ThrottleLimit).
+Windows PowerShell 5.1 runs sequentially.
+
+For example:
+
+Two hosts, custom policy, CSV too:  
+.\Get-NetworkExposure.ps1 -ComputerName example.com,10.0.0.5 -Policy .\policy.json -Json out.json -Csv out.csv
+
+From CSV:  
+.\Get-NetworkExposure.ps1 -TargetsCsv .\samples\targets.csv -Json fleet.json
 
 ---
 
