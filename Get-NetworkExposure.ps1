@@ -7,6 +7,24 @@ param(
   [string]$Policy
 )
 
+function Normalize-Policy {
+  param([object]$p)
+
+  if (-not $p) { $p = @{} }
+  elseif ($p -is [string]) {
+    try { $p = ConvertFrom-Json -InputObject $p -AsHashtable } catch { $p = @{} }
+  }
+  elseif ($p -isnot [hashtable]) {
+    # Convert PSCustomObject -> hashtable
+    $p = $p | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable
+  }
+
+  if (-not $p.ContainsKey('ports'))     { $p['ports']     = @{} }
+  if (-not $p.ContainsKey('tls'))       { $p['tls']       = @{} }
+  if (-not $p.ContainsKey('overrides')) { $p['overrides'] = @{} }
+  $p
+}
+
 # TCP Reachability
 function Test-TcpOpen {
   param([string]$Target,[int]$Port,[int]$TimeoutMs=1500)
@@ -51,7 +69,7 @@ function Get-HttpBanner {
     $r = New-Object IO.StreamReader($stream)
     $head = $r.ReadToEnd()
     $r.Dispose()
-    return (($head -split "`r`n") | Where-Object { $_ -match '^(Server:|X-Powered-By:)' } | -join ' ')
+  return ( ($head -split "`r`n" | Where-Object { $_ -match '^(Server:|X-Powered-By:)' }) -join ' ' )
   } catch { $null } finally { if ($tcp.Client) { $tcp.Client.Dispose() } }
 }
 
@@ -69,31 +87,59 @@ function Get-SshBanner {
   } catch { $null } finally { if ($tcp.Client) { $tcp.Client.Dispose() } }
 }
 
+function Merge-Hashtable {
+  param([hashtable]$Base, [hashtable]$Overlay)
+  if (-not $Base)    { $Base    = @{} }
+  if (-not $Overlay) { $Overlay = @{} }
+  $out = @{} + $Base
+  foreach ($k in $Overlay.Keys) { $out[$k] = $Overlay[$k] }
+  return $out
+}
+
 function Get-Policy {
   param([string]$Path)
 
-  # defaults
   $p = @{
-    ports = @{ '3389'='High'; '445'='High'; '5985'='Medium'; '5986'='Low' }
-    tls   = @{ minVersion='Tls12'; expiryDaysWarn=30; requireHostnameMatch=$true; handshakeFailure='High' }
+    ports     = @{ '3389'='High'; '445'='High'; '5985'='Medium'; '5986'='Low' }
+    tls       = @{ minVersion='Tls12'; expiryDaysWarn=30; requireHostnameMatch=$true; handshakeFailure='High' }
     overrides = @{}
   }
 
-  if ($Path) {
-    if (-not (Test-Path -LiteralPath $Path)) { throw "Policy not found: $Path" }
-    $raw = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json -Depth 5
-    if ($raw.ports)     { $p.ports     = @{} + $p.ports + $raw.ports }          # merge
-    if ($raw.tls)       { $p.tls       = @{} + $p.tls   + $raw.tls }
-    if ($raw.overrides) { $p.overrides = @{} + $raw.overrides }
+  if (-not $Path) { return $p }
+
+  if (-not (Test-Path -LiteralPath $Path)) { throw "Policy not found: $Path" }
+  $raw = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json -Depth 50
+
+  $raw = Normalize-Policy $raw
+
+  $p.ports = Merge-Hashtable $p.ports $raw.ports
+  $p.tls   = Merge-Hashtable $p.tls   $raw.tls
+
+  $ovFixed = @{}
+  foreach ($ovHost in $raw.overrides.Keys) {
+    $entry = $raw.overrides[$ovHost]
+    if ($entry -isnot [hashtable]) {
+      $entry = $entry | ConvertTo-Json -Depth 50 | ConvertFrom-Json -AsHashtable
+    }
+    if ($entry.ports -and $entry.ports -isnot [hashtable]) {
+      $entry.ports = $entry.ports | ConvertTo-Json -Depth 50 | ConvertFrom-Json -AsHashtable
+    }
+    if ($entry.tls -and $entry.tls -isnot [hashtable]) {
+      $entry.tls = $entry.tls | ConvertTo-Json -Depth 50 | ConvertFrom-Json -AsHashtable
+    }
+    $ovFixed[$ovHost] = $entry
   }
+
+  $p.overrides = Merge-Hashtable $p.overrides $ovFixed
   return $p
 }
 
 # Policy Eval
 function Evaluate-Exposure {
-  param(
-    [string]$Target,[int]$Port,[bool]$Open,[string]$Service,[object]$Tls,[string]$Banner,[hashtable]$Policy  
-  )
+  param([string]$Target,[int]$Port,[bool]$Open,[string]$Service,[object]$Tls,[string]$Banner,[object]$Policy)
+  
+  $Policy = Normalize-Policy $Policy
+
   $sev='Info'; $reasons=@()
   if (-not $Open) { return @{ Compliance='Compliant'; Severity='Info'; Reasons='' } }
 
@@ -112,20 +158,19 @@ function Evaluate-Exposure {
   # TLS policy
   if ($Service -eq 'https') {
     $min = $Policy.tls.minVersion
-    $warnDays = [int]$Policy.tls.expiryDaysWarn
-    $reqHost  = [bool]$Policy.tls.requireHostnameMatch
-    $hsFailSev = $Policy.tls.handshakeFailure
+    if (-not $min) { $min = 'Tls12' }
+    $warnDays = if ($Policy.tls.expiryDaysWarn) { [int]$Policy.tls.expiryDaysWarn } else { 30 }
+    $reqHost  = if ($Policy.tls.requireHostnameMatch -ne $null) { [bool]$Policy.tls.requireHostnameMatch } else { $true }
+    $hsFailSev = if ($Policy.tls.handshakeFailure) { $Policy.tls.handshakeFailure } else { 'High' }
 
     if (-not $Tls -or -not $Tls.TlsVersion) {
       $sev = $hsFailSev; $reasons += 'TLS handshake failed'
     } else {
-      # version compare: treat not-in list as below min
-      if ($Tls.TlsVersion -notin 'Tls10','Tls11','Tls12','Tls13') { $verRank = 0 }
-      else {
-        $rank = @{ Tls10=1; Tls11=2; Tls12=3; Tls13=4 }
-        $verRank = $rank[$Tls.TlsVersion]; $minRank = $rank[$min]
-        if ($verRank -lt $minRank) { $sev='High'; $reasons+='TLS below minimum' }
-      }
+      $rank = @{ Tls10=1; Tls11=2; Tls12=3; Tls13=4 }
+      $verRank = if ($Tls.TlsVersion -and $rank.ContainsKey($Tls.TlsVersion)) { $rank[$Tls.TlsVersion] } else { 0 }
+      $minRank = $rank[$min]
+      if ($verRank -lt $minRank) { $sev='High'; $reasons+='TLS below minimum' }
+
       if ($Tls.DaysToExpiry -lt 0) { $sev='High'; $reasons+='Cert expired' }
       elseif ($Tls.DaysToExpiry -le $warnDays -and $sev -ne 'High') {
         $sev='Medium'; $reasons+="Cert expires in $($Tls.DaysToExpiry)d"
@@ -142,16 +187,19 @@ function Evaluate-Exposure {
 
 # Host Scan
 function Invoke-ScanHost {
-  param([string]$Target,[int[]]$Ports,[int]$TimeoutMs=1500,[hashtable]$Policy)
+  param([string]$Target,[int[]]$Ports,[int]$TimeoutMs=1500,[object]$Policy)
+  
+  $Policy = Normalize-Policy $Policy
+  
   $eff = $Policy
   if ($Policy.overrides.ContainsKey($Target)) {
     $ov = $Policy.overrides[$Target]
-    $ovPorts = if ($ov.ports) { $ov.ports } else { @{} }
-    $ovTls   = if ($ov.tls)   { $ov.tls }   else { @{} }
+    $ovPorts = @{}; if ($ov -and $ov.ports) { $ovPorts = $ov.ports }
+    $ovTls   = @{}; if ($ov -and $ov.tls)   { $ovTls   = $ov.tls }
     $eff = @{
-        ports = @{} + $Policy.ports + $ovPorts
-        tls   = @{} + $Policy.tls   + $ovTls
-        overrides = $Policy.overrides
+      ports     = @{} + $Policy.ports + $ovPorts
+      tls       = @{} + $Policy.tls   + $ovTls
+      overrides = $Policy.overrides
     }
   }
 
@@ -199,12 +247,27 @@ if ($ComputerName) { $targets += $ComputerName }
 $targets = $targets | Sort-Object -Unique
 if (-not $targets) { throw "No targets." }
 
-if ($PSVersionTable.PSVersion.Major -ge 7) {
-  $all = $targets | ForEach-Object -Parallel {
-  & $using:function:Invoke-ScanHost -Target $_ -Ports $using:Ports -TimeoutMs $using:TimeoutMs -Policy $using:policy
-  } -ThrottleLimit $ThrottleLimit
-  $all = $all | ForEach-Object { $_ } | Where-Object { $_ }
+$fn_TestTcpOpen       = ${function:Test-TcpOpen}.ToString()
+$fn_GetTlsInfo        = ${function:Get-TlsInfo}.ToString()
+$fn_GetHttpBanner     = ${function:Get-HttpBanner}.ToString()
+$fn_GetSshBanner      = ${function:Get-SshBanner}.ToString()
+$fn_EvaluateExposure  = ${function:Evaluate-Exposure}.ToString()
+$fn_InvokeScanHost    = ${function:Invoke-ScanHost}.ToString()
 
+$policyJson = $policy | ConvertTo-Json -Depth 10
+
+if ($PSVersionTable.PSVersion.Major -ge 7 -and $ThrottleLimit -gt 1 -and $targets.Count -gt 1) {
+  $all = $targets | ForEach-Object -Parallel {
+    Set-Item function:Test-TcpOpen      -Value $using:fn_TestTcpOpen
+    Set-Item function:Get-TlsInfo       -Value $using:fn_GetTlsInfo
+    Set-Item function:Get-HttpBanner    -Value $using:fn_GetHttpBanner
+    Set-Item function:Get-SshBanner     -Value $using:fn_GetSshBanner
+    Set-Item function:Evaluate-Exposure -Value $using:fn_EvaluateExposure
+    Set-Item function:Invoke-ScanHost   -Value $using:fn_InvokeScanHost
+
+    Invoke-ScanHost -Target $_ -Ports $using:Ports -TimeoutMs $using:TimeoutMs -Policy $using:policyJson
+  } -ThrottleLimit $ThrottleLimit
+  $all = $all | Where-Object { $_ }
 } else {
   $all = foreach ($h in $targets) {
     Invoke-ScanHost -Target $h -Ports $Ports -TimeoutMs $TimeoutMs -Policy $policy
