@@ -75,14 +75,14 @@ CollectedAt (UTC)
 
 You can tune severities and TLS rules globally, and override per host with a policy.json file. For example:
 
-{
-  "ports": { "3389": "High", "445": "High", "5985": "Medium", "5986": "Low" },
-  "tls":   { "minVersion": "Tls12", "expiryDaysWarn": 30, "requireHostnameMatch": true, "handshakeFailure": "High" },
-  "overrides": {
-    "intranet-gw": { "ports": { "3389": "Medium" } },
-    "legacy.example.com": { "tls": { "minVersion": "Tls11" } }
-  }
-}
+{  
+  "ports": { "3389": "High", "445": "High", "5985": "Medium", "5986": "Low" },  
+  "tls":   { "minVersion": "Tls12", "expiryDaysWarn": 30, "requireHostnameMatch": true, "handshakeFailure": "High" },  
+  "overrides": {  
+    "intranet-gw": { "ports": { "3389": "Medium" } },  
+    "legacy.example.com": { "tls": { "minVersion": "Tls11" } }  
+  }  
+}  
 
 Use: .\Get-NetworkExposure.ps1 -ComputerName web1,web2 -Policy .\policy.json -Json out.json
 
