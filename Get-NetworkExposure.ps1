@@ -274,6 +274,9 @@ if ($PSVersionTable.PSVersion.Major -ge 7 -and $ThrottleLimit -gt 1 -and $target
   }
 }
 
+$by = $all | Group-Object Severity | Select Name,Count
+$by | Sort-Object Name | Format-Table -AutoSize
+
 $all | Format-Table Host,Port,Service,Open,Severity,Reasons -AutoSize
 if ($Json) { $all | ConvertTo-Json -Depth 5 | Out-File -Encoding utf8 $Json }
 if ($Csv)  { $all | Export-Csv -NoTypeInformation -Encoding UTF8 $Csv }
