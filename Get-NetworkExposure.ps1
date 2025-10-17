@@ -5,6 +5,7 @@ param(
   [string]$Json, [string]$Csv, [int]$TimeoutMs = 1500,
   [int]$ThrottleLimit = 32,
   [string]$Policy
+  [string]$SniHost
 )
 
 function Normalize-Policy {
@@ -41,7 +42,8 @@ function Get-TlsInfo {
   try {
     $ns = $Client.GetStream()
     $ssl = [System.Net.Security.SslStream]::new($ns,$false,({$true}))
-    $ssl.AuthenticateAsClient($Target)  # SNI
+    $serverName = $SniHost ? $SniHost : $Target
+    $ssl.AuthenticateAsClient($serverName)
     $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $ssl.RemoteCertificate
     [pscustomobject]@{
       TlsVersion   = $ssl.SslProtocol.ToString()
@@ -49,7 +51,7 @@ function Get-TlsInfo {
       CertIssuer   = $cert.Issuer
       NotAfter     = $cert.NotAfter.ToUniversalTime()
       DaysToExpiry = [int]([datetime]::UtcNow - $cert.NotAfter.ToUniversalTime()).TotalDays * -1
-      HostnameOK   = ($cert.GetNameInfo('DnsName',$false) -eq $Target) -or ($cert.Subject -match [regex]::Escape($Target))
+      HostnameOK   = ($cert.GetNameInfo('DnsName',$false) -eq $serverName) -or ($cert.Subject -match [regex]::Escape($serverName))
     }
   } catch {
     [pscustomobject]@{ TlsVersion=$null; CertSubject=$null; CertIssuer=$null; NotAfter=$null; DaysToExpiry=$null; HostnameOK=$false; Error=$_.Exception.Message }
@@ -187,7 +189,7 @@ function Evaluate-Exposure {
 
 # Host Scan
 function Invoke-ScanHost {
-  param([string]$Target,[int[]]$Ports,[int]$TimeoutMs=1500,[object]$Policy)
+  param([string]$Target,[int[]]$Ports,[int]$TimeoutMs=1500,[object]$Polic,[string]$SniHost )
   
   $Policy = Normalize-Policy $Policy
   
@@ -210,7 +212,7 @@ function Invoke-ScanHost {
     if ($open) {
       switch ($p) {
         80   { $svc='http';  $banner = Get-HttpBanner $Target 80 }
-        443  { $svc='https'; $tls = Get-TlsInfo -Target $Target -Port 443 -Client $tcp.Client; if ($tcp.Client){ $tcp.Client.Dispose() } }
+        443  { $svc='https'; $tls = Get-TlsInfo -Target $Target -Port 443 -Client $tcp.Client -SniHost $SniHost; if ($tcp.Client){ $tcp.Client.Dispose() } }
         22   { $svc='ssh';   $banner = Get-SshBanner $Target 22 }
         445  { $svc='smb' }
         3389 { $svc='rdp' }
@@ -265,12 +267,12 @@ if ($PSVersionTable.PSVersion.Major -ge 7 -and $ThrottleLimit -gt 1 -and $target
     Set-Item function:Evaluate-Exposure -Value $using:fn_EvaluateExposure
     Set-Item function:Invoke-ScanHost   -Value $using:fn_InvokeScanHost
 
-    Invoke-ScanHost -Target $_ -Ports $using:Ports -TimeoutMs $using:TimeoutMs -Policy $using:policyJson
+    Invoke-ScanHost -Target $_ -Ports $using:Ports -TimeoutMs $using:TimeoutMs -Policy $using:policyJson -SniHost $using:SniHost
   } -ThrottleLimit $ThrottleLimit
   $all = $all | Where-Object { $_ }
 } else {
   $all = foreach ($h in $targets) {
-    Invoke-ScanHost -Target $h -Ports $Ports -TimeoutMs $TimeoutMs -Policy $policy
+    Invoke-ScanHost -Target $h -Ports $Ports -TimeoutMs $TimeoutMs -Policy $policy -SniHost $SniHost
   }
 }
 
